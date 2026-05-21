@@ -1,0 +1,8 @@
+# OS/editor
+.DS_Store
+.vscode/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
