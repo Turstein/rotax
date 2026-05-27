@@ -4,29 +4,45 @@
 """
 rotax.py
 
-Single-file version of the rotax rotavirus genotyping pipeline.
+Single-file version of the RotaX rotavirus genotyping pipeline.
 
 Run from the parent folder that contains one folder per sample.
 Each sample folder should contain paired-end FASTQ files matching:
     *_R1_001.fastq.gz
     *_R2_001.fastq.gz
 
-Typical use:
+Default use:
     conda activate rotax
+    python3 /path/to/rotax.py
+
+By default, the rotavirus BLAST database is auto-detected in:
+    /path/to/rotax.py/blastdb/
+
+You can still provide another database prefix/path:
     python3 /path/to/rotax.py --blast-db /path/to/241130_rotadb
 
-Optional host database:
-    python3 /path/to/rotax.py \
-        --blast-db /path/to/241130_rotadb \
-        --host-db /path/to/hostdb/hostdatabase250421
+Assembly selection:
+    Default is to run all assembly modes.
+    To run only one or more selected modes:
+        python3 /path/to/rotax.py --assemblies rnaviralspades
+        python3 /path/to/rotax.py --assemblies rnaviralspades spades-isolate
+        python3 /path/to/rotax.py --assemblies bbnorm100-rnaviralspades bbnorm500-rnaviralspades
 
-If contigs500.fasta already exists in every sample folder and you only want to rerun
-genotyping:
-    python3 /path/to/rotax.py --skip-assembly --blast-db /path/to/241130_rotadb
+Supported assembly mode names:
+    bbnorm100-rnaviralspades
+    bbnorm500-rnaviralspades
+    rnaviralspades
+    spades-isolate
+    clumpify-rnaviralspades
+
+FASTA-only genotyping:
+    To genotype an existing FASTA file without FASTQ assembly:
+        python3 /path/to/rotax.py --fasta-input selected_contigs.fasta
 
 Main outputs:
     Parent folder:
         rotax_all_samples_genotyping_report.csv
+        rotax_full_length_low_identity_x_report.csv
         rotax_pipeline_log.txt
 
     Each sample folder:
@@ -38,13 +54,13 @@ Main outputs:
         rotax_sample_genotyping_report.csv
         rotavirus_selected_contigs.fasta
         rotavirus_selected_orfs.fasta
-        host_blast_comparison.csv, if --host-db is available
+        rotavirus_full_length_low_identity_x_hits.csv
 
 Notes:
-    - The BLAST database remains external.
+    - Host database searching has been removed.
     - The old adapter FASTA is embedded here so adapters.fa is no longer required.
-    - This script intentionally omits old/commented/obsolete parts from the repository.
 """
+
 
 from __future__ import annotations
 
@@ -67,13 +83,35 @@ AGATCGGAAGAGCACACGTCTGAACTCCAGTCA
 AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT
 """
 
-WORK_FASTAS = {
-    "work1": "_bbnorm100rnaviralspades",
-    "work2": "_bbnorm500rnaviralspades",
-    "work3": "_rnaviralspades",
-    "work6": "_spadesIsolateAutocutoff",
-    "work7": "_clumpifyrnaviralspades",
+ASSEMBLY_OPTIONS = {
+    "bbnorm100-rnaviralspades": {
+        "work_dir": "work1",
+        "suffix": "_bbnorm100rnaviralspades",
+        "description": "BBnorm target=100, then rnaviralSPAdes",
+    },
+    "bbnorm500-rnaviralspades": {
+        "work_dir": "work2",
+        "suffix": "_bbnorm500rnaviralspades",
+        "description": "BBnorm target=500, then rnaviralSPAdes",
+    },
+    "rnaviralspades": {
+        "work_dir": "work3",
+        "suffix": "_rnaviralspades",
+        "description": "rnaviralSPAdes on trimmed paired reads without BBnorm",
+    },
+    "spades-isolate": {
+        "work_dir": "work6",
+        "suffix": "_spadesIsolateAutocutoff",
+        "description": "SPAdes with --isolate and --cov-cutoff auto",
+    },
+    "clumpify-rnaviralspades": {
+        "work_dir": "work7",
+        "suffix": "_clumpifyrnaviralspades",
+        "description": "Clumpify deduplication, then rnaviralSPAdes",
+    },
 }
+
+DEFAULT_ASSEMBLIES = list(ASSEMBLY_OPTIONS)
 
 GENE_ORDER = ["G", "P", "I", "R", "C", "M", "A", "N", "T", "E", "H"]
 
@@ -202,10 +240,18 @@ def reverse_complement(seq: str) -> str:
     return seq.translate(table)[::-1]
 
 
-def collect_and_filter_contigs(sample_dir: Path, log_path: Path) -> None:
+def collect_and_filter_contigs(
+    sample_dir: Path,
+    log_path: Path,
+    assemblies: list[str] | None = None,
+) -> None:
     contigs: list[tuple[str, str]] = []
+    selected = assemblies or DEFAULT_ASSEMBLIES
 
-    for work_dir, suffix in WORK_FASTAS.items():
+    for assembly_name in selected:
+        info = ASSEMBLY_OPTIONS[assembly_name]
+        work_dir = str(info["work_dir"])
+        suffix = str(info["suffix"])
         fasta_path = sample_dir / work_dir / "contigs.fasta"
         if not fasta_path.exists():
             log(f"File not found: {fasta_path}", log_path)
@@ -231,12 +277,18 @@ def filter_by_coverage(sample_dir: Path, min_cov: float, log_path: Path) -> None
     log(f"Coverage filter: kept {len(kept)} of {len(records)} contigs with coverage >= {min_cov}", log_path)
 
 
-def run_assembly(sample_dir: Path, threads: int, log_path: Path) -> bool:
+def run_assembly(
+    sample_dir: Path,
+    threads: int,
+    log_path: Path,
+    assemblies: list[str],
+) -> bool:
     r1, r2 = find_fastq_pair(sample_dir)
     if r1 is None or r2 is None:
         log(f"No *_R1_001.fastq.gz / *_R2_001.fastq.gz pair found in {sample_dir.name}; skipping assembly", log_path)
         return False
 
+    selected = set(assemblies)
     adapters = write_adapter_file(sample_dir)
 
     ok = run_command(
@@ -262,119 +314,125 @@ def run_assembly(sample_dir: Path, threads: int, log_path: Path) -> bool:
         log(f"Trimmomatic paired outputs are empty in {sample_dir.name}; skipping sample", log_path)
         return False
 
-    ok = run_command(
-        [
-            "clumpify.sh",
-            "in1=R1_paired.fastq.gz",
-            "in2=R2_paired.fastq.gz",
-            "out1=deduped_R1.fastq.gz",
-            "out2=deduped_R2.fastq.gz",
-            "dedupe",
-        ],
-        log_path,
-        cwd=sample_dir,
-    )
-    if not ok:
-        log(f"Clumpify failed in {sample_dir.name}; continuing without work7", log_path)
-
-    ok = run_command(
-        [
-            "bbnorm.sh",
-            "in1=R1_paired.fastq.gz",
-            "in2=R2_paired.fastq.gz",
-            "out1=R1bbnorm.fastq.gz",
-            "out2=R2bbnorm.fastq.gz",
-            "target=100",
-            "min=5",
-        ],
-        log_path,
-        cwd=sample_dir,
-    )
-    if ok and is_nonempty(sample_dir / "R1bbnorm.fastq.gz") and is_nonempty(sample_dir / "R2bbnorm.fastq.gz"):
-        run_command(
+    if "clumpify-rnaviralspades" in selected:
+        ok = run_command(
             [
-                "rnaviralspades.py",
-                "-t", str(threads),
-                "-1", "R1bbnorm.fastq.gz",
-                "-2", "R2bbnorm.fastq.gz",
-                "-o", "work1",
+                "clumpify.sh",
+                "in1=R1_paired.fastq.gz",
+                "in2=R2_paired.fastq.gz",
+                "out1=deduped_R1.fastq.gz",
+                "out2=deduped_R2.fastq.gz",
+                "dedupe",
             ],
             log_path,
             cwd=sample_dir,
         )
-    else:
-        log(f"BBnorm target=100 output missing/empty in {sample_dir.name}; skipping work1", log_path)
+        if not ok:
+            log(f"Clumpify failed in {sample_dir.name}; skipping clumpify-rnaviralspades", log_path)
 
-    ok = run_command(
-        [
-            "bbnorm.sh",
-            "in1=R1_paired.fastq.gz",
-            "in2=R2_paired.fastq.gz",
-            "out1=R1bbnorm2.fastq.gz",
-            "out2=R2bbnorm2.fastq.gz",
-            "target=500",
-            "min=5",
-        ],
-        log_path,
-        cwd=sample_dir,
-    )
-    if ok and is_nonempty(sample_dir / "R1bbnorm2.fastq.gz") and is_nonempty(sample_dir / "R2bbnorm2.fastq.gz"):
-        run_command(
+    if "bbnorm100-rnaviralspades" in selected:
+        ok = run_command(
             [
-                "rnaviralspades.py",
-                "-t", str(threads),
-                "-1", "R1bbnorm2.fastq.gz",
-                "-2", "R2bbnorm2.fastq.gz",
-                "-o", "work2",
+                "bbnorm.sh",
+                "in1=R1_paired.fastq.gz",
+                "in2=R2_paired.fastq.gz",
+                "out1=R1bbnorm.fastq.gz",
+                "out2=R2bbnorm.fastq.gz",
+                "target=100",
+                "min=5",
             ],
             log_path,
             cwd=sample_dir,
         )
-    else:
-        log(f"BBnorm target=500 output missing/empty in {sample_dir.name}; skipping work2", log_path)
+        if ok and is_nonempty(sample_dir / "R1bbnorm.fastq.gz") and is_nonempty(sample_dir / "R2bbnorm.fastq.gz"):
+            run_command(
+                [
+                    "rnaviralspades.py",
+                    "-t", str(threads),
+                    "-1", "R1bbnorm.fastq.gz",
+                    "-2", "R2bbnorm.fastq.gz",
+                    "-o", "work1",
+                ],
+                log_path,
+                cwd=sample_dir,
+            )
+        else:
+            log(f"BBnorm target=100 output missing/empty in {sample_dir.name}; skipping bbnorm100-rnaviralspades", log_path)
 
-    run_command(
-        [
-            "rnaviralspades.py",
-            "-t", str(threads),
-            "-1", "R1_paired.fastq.gz",
-            "-2", "R2_paired.fastq.gz",
-            "-o", "work3",
-        ],
-        log_path,
-        cwd=sample_dir,
-    )
-
-    run_command(
-        [
-            "spades.py",
-            "-t", str(threads),
-            "--isolate",
-            "--cov-cutoff", "auto",
-            "-1", "R1_paired.fastq.gz",
-            "-2", "R2_paired.fastq.gz",
-            "-o", "work6",
-        ],
-        log_path,
-        cwd=sample_dir,
-    )
-
-    if is_nonempty(sample_dir / "deduped_R1.fastq.gz") and is_nonempty(sample_dir / "deduped_R2.fastq.gz"):
-        run_command(
+    if "bbnorm500-rnaviralspades" in selected:
+        ok = run_command(
             [
-                "rnaviralspades.py",
-                "-t", str(threads),
-                "-1", "deduped_R1.fastq.gz",
-                "-2", "deduped_R2.fastq.gz",
-                "-o", "work7",
+                "bbnorm.sh",
+                "in1=R1_paired.fastq.gz",
+                "in2=R2_paired.fastq.gz",
+                "out1=R1bbnorm2.fastq.gz",
+                "out2=R2bbnorm2.fastq.gz",
+                "target=500",
+                "min=5",
             ],
             log_path,
             cwd=sample_dir,
         )
-    else:
-        log(f"Deduped output missing/empty in {sample_dir.name}; skipping work7", log_path)
+        if ok and is_nonempty(sample_dir / "R1bbnorm2.fastq.gz") and is_nonempty(sample_dir / "R2bbnorm2.fastq.gz"):
+            run_command(
+                [
+                    "rnaviralspades.py",
+                    "-t", str(threads),
+                    "-1", "R1bbnorm2.fastq.gz",
+                    "-2", "R2bbnorm2.fastq.gz",
+                    "-o", "work2",
+                ],
+                log_path,
+                cwd=sample_dir,
+            )
+        else:
+            log(f"BBnorm target=500 output missing/empty in {sample_dir.name}; skipping bbnorm500-rnaviralspades", log_path)
 
-    collect_and_filter_contigs(sample_dir, log_path)
+    if "rnaviralspades" in selected:
+        run_command(
+            [
+                "rnaviralspades.py",
+                "-t", str(threads),
+                "-1", "R1_paired.fastq.gz",
+                "-2", "R2_paired.fastq.gz",
+                "-o", "work3",
+            ],
+            log_path,
+            cwd=sample_dir,
+        )
+
+    if "spades-isolate" in selected:
+        run_command(
+            [
+                "spades.py",
+                "-t", str(threads),
+                "--isolate",
+                "--cov-cutoff", "auto",
+                "-1", "R1_paired.fastq.gz",
+                "-2", "R2_paired.fastq.gz",
+                "-o", "work6",
+            ],
+            log_path,
+            cwd=sample_dir,
+        )
+
+    if "clumpify-rnaviralspades" in selected:
+        if is_nonempty(sample_dir / "deduped_R1.fastq.gz") and is_nonempty(sample_dir / "deduped_R2.fastq.gz"):
+            run_command(
+                [
+                    "rnaviralspades.py",
+                    "-t", str(threads),
+                    "-1", "deduped_R1.fastq.gz",
+                    "-2", "deduped_R2.fastq.gz",
+                    "-o", "work7",
+                ],
+                log_path,
+                cwd=sample_dir,
+            )
+        else:
+            log(f"Deduped output missing/empty in {sample_dir.name}; skipping clumpify-rnaviralspades", log_path)
+
+    collect_and_filter_contigs(sample_dir, log_path, assemblies)
     return True
 
 
@@ -1016,30 +1074,138 @@ def selected_orfs(sample_dir: Path, log_path: Path) -> None:
     log(f"Generated {output_fasta.name} with {len(out_records)} sequences", log_path)
 
 
-def run_host_blast(sample_dir: Path, host_db: str | None, log_path: Path) -> None:
-    if not host_db:
-        log("No --host-db provided; skipping host BLAST", log_path)
+def prepare_fasta_input_sample(fasta_input: Path, parent_dir: Path, log_path: Path) -> Path | None:
+    if not fasta_input.exists():
+        log(f"FASTA input not found: {fasta_input}", log_path)
+        return None
+
+    records = parse_fasta(fasta_input)
+    if not records:
+        log(f"FASTA input contains no sequences: {fasta_input}", log_path)
+        return None
+
+    sample_name = fasta_input.stem
+    sample_dir = parent_dir / sample_name
+    sample_dir.mkdir(exist_ok=True)
+
+    # For FASTA-only mode, do not apply SPAdes coverage filtering. The BLAST
+    # length and percent-identity criteria are still evaluated downstream.
+    write_fasta(records, sample_dir / "contigs.fasta")
+    write_fasta(records, sample_dir / "contigs500.fasta")
+    write_fasta(records, sample_dir / "contigs500_COV.fasta")
+
+    log(f"Prepared FASTA-only sample folder {sample_dir.name} with {len(records)} sequence(s)", log_path)
+    return sample_dir
+
+
+def full_length_low_identity_x_report(sample_dir: Path, log_path: Path) -> None:
+    blast_file = sample_dir / "rotavirus_blast_evaluated.csv"
+    output_file = sample_dir / "rotavirus_full_length_low_identity_x_hits.csv"
+
+    fields = [
+        "Folder Name",
+        "FullLengthLowIdentityHitCount",
+        "BlastHeader",
+        "BlastLines",
+    ]
+
+    blast_headers = [
+        "qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
+        "qstart", "qend", "sstart", "send", "evalue", "bitscore",
+        "sstrand", "slen",
+    ]
+    blast_header_line = "\t".join(blast_headers)
+
+    if not blast_file.exists():
+        with output_file.open("w", newline="", encoding="utf-8") as out:
+            writer = csv.DictWriter(out, fieldnames=fields)
+            writer.writeheader()
         return
 
-    query = sample_dir / "rotavirus_selected_orfs.fasta"
-    if not query.exists() or not parse_fasta(query):
-        log(f"{query.name} missing/empty; skipping host BLAST", log_path)
-        return
+    rows: list[dict[str, str]] = []
+    with blast_file.open("r", newline="", encoding="utf-8", errors="replace") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            rows.append(row)
 
-    run_command(
-        [
-            "blastn",
-            "-query", query.name,
-            "-db", host_db,
-            "-out", "host_blast_comparison.csv",
-            "-outfmt",
-            "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sstrand slen",
-            "-max_target_seqs", "1",
-            "-strand", "both",
-        ],
-        log_path,
-        cwd=sample_dir,
-    )
+    accepted_genes: set[str] = set()
+    for row in rows:
+        evaluation = row.get("Evaluation", "")
+        if evaluation and evaluation != "not accepted":
+            gene, _number = extract_gene_and_number(evaluation)
+            if gene:
+                accepted_genes.add(gene)
+
+    low_identity_lines: list[str] = []
+    for row in rows:
+        if row.get("Evaluation", "") != "not accepted":
+            continue
+
+        sseqid = row.get("sseqid", "")
+        genotype = sseqid.split("|", 1)[0] if sseqid else ""
+        gene = genotype[0] if genotype else ""
+        if gene not in BASE_THRESHOLDS or gene in accepted_genes:
+            continue
+
+        try:
+            pident = float(row.get("pident", ""))
+            length = int(row.get("length", ""))
+            slen = int(row.get("slen", ""))
+        except ValueError:
+            continue
+
+        is_full = length >= slen
+        identity_failed = pident < BASE_THRESHOLDS[gene]
+        if not (is_full and identity_failed):
+            continue
+
+        line = "\t".join(row.get(h, "") for h in blast_headers)
+        low_identity_lines.append(line)
+
+    with output_file.open("w", newline="", encoding="utf-8") as out:
+        writer = csv.DictWriter(out, fieldnames=fields)
+        writer.writeheader()
+        if low_identity_lines:
+            writer.writerow({
+                "Folder Name": sample_dir.name,
+                "FullLengthLowIdentityHitCount": len(low_identity_lines),
+                "BlastHeader": blast_header_line,
+                "BlastLines": " || ".join(low_identity_lines),
+            })
+
+    log(f"Generated {output_file.name}", log_path)
+
+
+def combine_low_identity_x_reports(parent_dir: Path, log_path: Path) -> Path | None:
+    output_file = parent_dir / "rotax_full_length_low_identity_x_report.csv"
+    report_files = sorted(parent_dir.glob("*/rotavirus_full_length_low_identity_x_hits.csv"))
+
+    fields = [
+        "Folder Name",
+        "FullLengthLowIdentityHitCount",
+        "BlastHeader",
+        "BlastLines",
+    ]
+
+    wrote_any = False
+    with output_file.open("w", newline="", encoding="utf-8") as out:
+        writer = csv.DictWriter(out, fieldnames=fields)
+        writer.writeheader()
+
+        for report in report_files:
+            with report.open("r", newline="", encoding="utf-8", errors="replace") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    if row.get("Folder Name"):
+                        writer.writerow({field: row.get(field, "") for field in fields})
+                        wrote_any = True
+
+    if wrote_any:
+        log(f"Generated final full-length low-identity X report: {output_file.name}", log_path)
+    else:
+        log(f"Generated empty final full-length low-identity X report: {output_file.name}", log_path)
+
+    return output_file
 
 
 def safe_remove(path: Path, log_path: Path) -> None:
@@ -1053,8 +1219,8 @@ def safe_remove(path: Path, log_path: Path) -> None:
 
 
 def cleanup_sample(sample_dir: Path, log_path: Path) -> None:
-    for name in ["work1", "work2", "work3", "work6", "work7"]:
-        safe_remove(sample_dir / name, log_path)
+    for info in ASSEMBLY_OPTIONS.values():
+        safe_remove(sample_dir / str(info["work_dir"]), log_path)
 
     for name in [
         "R1bbnorm.fastq.gz",
@@ -1083,7 +1249,7 @@ def process_sample(
 
     try:
         if not args.skip_assembly:
-            assembled = run_assembly(sample_dir, args.threads, log_path)
+            assembled = run_assembly(sample_dir, args.threads, log_path, args.assemblies)
             if not assembled and not (sample_dir / "contigs500.fasta").exists():
                 log(f"No assembly output for {sample_dir.name}; skipping genotyping", log_path)
                 return False
@@ -1092,7 +1258,10 @@ def process_sample(
             log(f"{sample_dir.name}: contigs500.fasta not found; skipping genotyping", log_path)
             return False
 
-        filter_by_coverage(sample_dir, args.min_cov, log_path)
+        if args.fasta_input:
+            log(f"{sample_dir.name}: FASTA-input mode; skipping SPAdes coverage filtering", log_path)
+        else:
+            filter_by_coverage(sample_dir, args.min_cov, log_path)
 
         if not blast_rotavirus(sample_dir, args.blast_db, log_path):
             log(f"{sample_dir.name}: rotavirus BLAST failed or produced no usable input", log_path)
@@ -1101,6 +1270,7 @@ def process_sample(
         if not is_nonempty(sample_dir / "rotavirus_blast_raw.tsv"):
             log(f"{sample_dir.name}: rotavirus_blast_raw.tsv is empty; writing empty genotype report", log_path)
             write_empty_genotype_report(sample_dir)
+            full_length_low_identity_x_report(sample_dir, log_path)
             return True
 
         evaluate_blast(sample_dir, log_path)
@@ -1109,7 +1279,7 @@ def process_sample(
         add_vaccine_match_columns(sample_dir, log_path)
         selected_contigs(sample_dir, log_path)
         selected_orfs(sample_dir, log_path)
-        run_host_blast(sample_dir, args.host_db, log_path)
+        full_length_low_identity_x_report(sample_dir, log_path)
 
         return True
 
@@ -1143,7 +1313,7 @@ def infer_result_category(g_p_genotype: str) -> str:
     Otherwise the row is left as an unresolved rotavirus sequence result.
     """
     if "-" not in g_p_genotype:
-        return "unresolved_rotavirus_sequence"
+        return "UTILSTREKV"
 
     g_part, p_part = g_p_genotype.split("-", 1)
     if re.fullmatch(r"G\d+", g_part) and (
@@ -1151,7 +1321,7 @@ def infer_result_category(g_p_genotype: str) -> str:
     ):
         return "RVA"
 
-    return "unresolved_rotavirus_sequence"
+    return "UTILSTREKV"
 
 
 def combine_sample_reports(parent_dir: Path, log_path: Path) -> Path | None:
@@ -1201,46 +1371,109 @@ def sample_folders(parent_dir: Path) -> list[Path]:
     return folders
 
 
-def check_required_tools(skip_assembly: bool, host_db: str | None, log_path: Path) -> None:
+def check_required_tools(skip_assembly: bool, assemblies: list[str], log_path: Path) -> None:
     required = ["blastn"]
     if not skip_assembly:
-        required.extend(["trimmomatic", "clumpify.sh", "bbnorm.sh", "rnaviralspades.py", "spades.py"])
+        required.append("trimmomatic")
+        if any(name in assemblies for name in ["rnaviralspades", "bbnorm100-rnaviralspades", "bbnorm500-rnaviralspades", "clumpify-rnaviralspades"]):
+            required.append("rnaviralspades.py")
+        if any(name in assemblies for name in ["bbnorm100-rnaviralspades", "bbnorm500-rnaviralspades"]):
+            required.append("bbnorm.sh")
+        if "clumpify-rnaviralspades" in assemblies:
+            required.append("clumpify.sh")
+        if "spades-isolate" in assemblies:
+            required.append("spades.py")
 
-    missing = [tool for tool in required if shutil.which(tool) is None]
+    missing = sorted({tool for tool in required if shutil.which(tool) is None})
     if missing:
         log("Missing required executable(s) in PATH: " + ", ".join(missing), log_path)
         raise SystemExit(2)
 
-    if host_db and shutil.which("blastn") is None:
-        log("blastn missing in PATH; host BLAST cannot run", log_path)
-        raise SystemExit(2)
+
+def resolve_blast_db(blast_db_arg: str | None) -> str:
+    if blast_db_arg:
+        return str(Path(blast_db_arg).expanduser())
+
+    db_dir = Path(__file__).resolve().parent / "blastdb"
+    if not db_dir.exists():
+        raise SystemExit(
+            f"No --blast-db was provided and default BLAST database folder was not found: {db_dir}"
+        )
+
+    if db_dir.is_file():
+        return str(db_dir)
+
+    # BLAST database files normally share a prefix and end in extensions such as
+    # .nhr/.nin/.nsq or .ndb/.not/.ntf/.nto. Auto-detect one unique prefix.
+    prefixes: set[Path] = set()
+    for path in db_dir.iterdir():
+        name = path.name
+        if name.endswith((".nhr", ".nin", ".nsq", ".ndb", ".not", ".ntf", ".nto")):
+            prefixes.add(path.with_suffix(""))
+        elif re.search(r"\.\d{2}\.(nhr|nin|nsq)$", name):
+            prefixes.add(Path(str(path).rsplit(".", 2)[0]))
+
+    if len(prefixes) == 1:
+        return str(next(iter(prefixes)))
+
+    if len(prefixes) > 1:
+        options = "\n  ".join(str(p) for p in sorted(prefixes))
+        raise SystemExit(
+            "More than one BLAST database prefix was found in the default blastdb folder. "
+            "Please choose one with --blast-db. Found:\n  " + options
+        )
+
+    return str(db_dir)
 
 
 def parse_args() -> argparse.Namespace:
+    assembly_choices = list(ASSEMBLY_OPTIONS)
+
     parser = argparse.ArgumentParser(
-        description="Single-file rotax pipeline for rotavirus genotyping from Illumina reads or existing contigs."
+        description="Single-file RotaX pipeline for rotavirus genotyping from Illumina reads or FASTA sequences.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--blast-db",
-        default=str(Path(__file__).resolve().parent / "241130_rotadb"),
-        help="Path/prefix of the rotavirus BLAST database. Default: 241130_rotadb next to this script.",
+        default=None,
+        help=(
+            "Path/prefix of the rotavirus BLAST database. "
+            "Default: auto-detect one BLAST database prefix inside a folder named blastdb next to this script."
+        ),
     )
     parser.add_argument(
-        "--host-db",
+        "--fasta-input",
         default=None,
-        help="Optional path/prefix of the host BLAST database. If omitted, host_blast_comparison.csv is skipped.",
+        help=(
+            "FASTA file to genotype directly without assembly. A sample folder named after the FASTA file stem "
+            "is created in the current working directory."
+        ),
     )
     parser.add_argument(
         "--threads",
         type=int,
         default=12,
-        help="Threads for SPAdes/rnaviralSPAdes. Default: 12.",
+        help="Threads for SPAdes/rnaviralSPAdes.",
     )
     parser.add_argument(
         "--min-cov",
         type=float,
         default=3.0,
-        help="Minimum SPAdes k-mer coverage parsed from contig header. Default: 3.",
+        help=(
+            "Minimum SPAdes k-mer coverage parsed from contig headers. "
+            "This is not applied in --fasta-input mode."
+        ),
+    )
+    parser.add_argument(
+        "--assemblies",
+        nargs="+",
+        choices=assembly_choices,
+        default=DEFAULT_ASSEMBLIES,
+        metavar="MODE",
+        help=(
+            "Assembly mode(s) to run. Default is all modes. "
+            "Choices: " + ", ".join(assembly_choices)
+        ),
     )
     parser.add_argument(
         "--skip-assembly",
@@ -1254,7 +1487,18 @@ def parse_args() -> argparse.Namespace:
         help="Keep intermediate work folders and FASTQ files.",
     )
     parser.set_defaults(cleanup=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # FASTA input is a direct genotyping mode and should not try to assemble.
+    if args.fasta_input:
+        args.skip_assembly = True
+
+    # Deduplicate while preserving input order.
+    seen: set[str] = set()
+    args.assemblies = [mode for mode in args.assemblies if not (mode in seen or seen.add(mode))]
+
+    args.blast_db = resolve_blast_db(args.blast_db)
+    return args
 
 
 def main() -> int:
@@ -1268,14 +1512,18 @@ def main() -> int:
     log(f"Script started in {parent_dir}", log_path)
     log(f"Start time: {start_date}", log_path)
     log(f"Rotavirus BLAST DB: {args.blast_db}", log_path)
-    if args.host_db:
-        log(f"Host BLAST DB: {args.host_db}", log_path)
+    log("Selected assembly modes: " + ", ".join(args.assemblies), log_path)
+    if args.fasta_input:
+        log(f"FASTA input mode: {args.fasta_input}", log_path)
+
+    check_required_tools(args.skip_assembly, args.assemblies, log_path)
+
+    if args.fasta_input:
+        fasta_sample = prepare_fasta_input_sample(Path(args.fasta_input).expanduser(), parent_dir, log_path)
+        folders = [fasta_sample] if fasta_sample else []
     else:
-        log("Host BLAST DB: not provided", log_path)
+        folders = sample_folders(parent_dir)
 
-    check_required_tools(args.skip_assembly, args.host_db, log_path)
-
-    folders = sample_folders(parent_dir)
     if not folders:
         log("No sample folders found one level below current directory", log_path)
         return 1
@@ -1291,6 +1539,7 @@ def main() -> int:
             failed += 1
 
     combine_sample_reports(parent_dir, log_path)
+    combine_low_identity_x_reports(parent_dir, log_path)
 
     elapsed = int(time.time() - start_time)
     log(f"Script ended in {parent_dir}", log_path)

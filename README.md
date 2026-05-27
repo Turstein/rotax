@@ -95,7 +95,7 @@ This is the main all-samples report. It contains one row per sample and includes
 - `Rotarix VP4`: percent identity to the RIX4414 VP4 reference, if relevant
 - `RotaTeq VP6`: percent identity to the RotaTeq VP6 reference, if relevant
 - `G_P_Genotype`: only the G/P part of the genotype constellation
-- `ResultCategory`: generic result category, currently `RVA` when both G and P are resolved, otherwise `unresolved_rotavirus_sequence`
+- `ResultCategory`: generic result category, currently `RVA` when both G and P are resolved, otherwise `UTILSTREKV`
 
 The main log file is:
 
@@ -208,9 +208,6 @@ These values are reported only when the expected genotype/segment and reference-
 
 `not accepted` means that the BLAST hit did not pass the current criteria for being carried forward as a genotype call. The details are written to `not_accepted_typing_report.csv`.
 
-Older versions of the pipeline could carry forward low-identity hits using strings such as `0000` followed by percent identity. The updated `rotax.py` does not use those values as genotype calls. Below-threshold hits are marked as `not accepted` instead.
-
-The current repository may contain updates beyond the validated release. For validated G/P typing, use the appropriate release version if one is provided.
 
 ## NGS bioinformatics pipeline
 
