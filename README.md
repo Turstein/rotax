@@ -1,12 +1,27 @@
 # rotax
 
+## Latest version
+
+- **Executable:** `/mnt/tempdata/rota/rotax/rotax.py`
+- **Version:** `2026-11-11-v34-report-columns` 
+- **Updated:** 2026-11-11
+
+
+Verify the installed version:
+
+```bash
+python3 /mnt/tempdata/rota/rotax/rotax.py --version
+```
+
+For every future release, update this version, update date, and executable path together.
+
 ## About
 
 **Warning:** `rotax` is a command-line pipeline for genotyping Rotavirus A and is still under validation. The most validated use is currently G- and P-typing. Results for the remaining genome segments should be interpreted with extra care and checked manually when important.
 
 `rotax` genotypes Rotavirus A from Illumina paired-end data or from already assembled contigs. It performs de novo assembly with several SPAdes/rnaViralSPAdes strategies, collects contigs, filters them by length and coverage, and then performs genotyping with BLAST against a local rotavirus database.
 
-The pipeline reports the full 11-segment Rotavirus A genotype constellation:
+The pipeline preserves the full 11-segment Rotavirus A genotype constellation in `Genotype`:
 
 ```text
 G-P-I-R-C-M-A-N-T-E-H
@@ -34,6 +49,37 @@ Activate the environment before running the pipeline:
 conda activate rotax
 ```
 
+## Create the BLAST databases
+
+Run these commands in the `rotax` conda environment, which must provide
+`makeblastdb` and `blastdbcmd` from NCBI BLAST+. They build or rebuild the indexes
+from the existing reference FASTA files.
+
+mamba activate rotax
+makeblastdb -in /mnt/tempdata/rota/rotax/blastdb/References_all_segments_plus_vaccine.fasta -dbtype nucl -out /mnt/tempdata/rota/rotax/blastdb/References_all_segments_plus_vaccine
+
+```
+
+These commands omit `-parse_seqids` to accommodate the existing custom reference
+headers. Keep each source FASTA beside its database with the same prefix and
+the `.fasta` extension: RotaX uses it to retrieve reference sequences for mapping
+and alignment. Preserve the genotype prefixes and vaccine markers in headers.
+Rebuild the corresponding database whenever its source FASTA changes.
+
+The script can auto-detect these databases when each directory contains only
+one indexed database prefix. To select them explicitly, run the following from
+the parent directory containing the sample folders:
+
+```bash
+python3 /mnt/tempdata/rota/rotax/rotax.py \
+    --blast-db /mnt/tempdata/rota/rotax/blastdb/References_all_segments_plus_vaccine \
+    --full-segment-db /mnt/tempdata/rota/rotax/fulldb/rotavirus_full_segments
+```
+
+Pass the database **prefix**, without `.fasta`, `.nin`, or `.nsq`, to these
+options. The genotyping and full-segment databases serve different purposes;
+keep them in their respective directories.
+
 ## Use
 
 Run `rotax.py` from the parent directory containing one folder per sample.
@@ -48,32 +94,32 @@ Each sample folder should contain paired-end FASTQ files matching:
 Typical use:
 
 ```bash
-python3 /path/to/rotax.py --blast-db /path/to/241130_rotadb
+python3 /mnt/tempdata/rota/rotax/rotax.py --blast-db /path/to/241130_rotadb
 ```
 
-Optional host database:
-
-```bash
-python3 /path/to/rotax.py \
-    --blast-db /path/to/241130_rotadb \
-    --host-db /path/to/hostdb/hostdatabase250421
-```
+Without `--blast-db`, the script looks for a unique indexed database prefix in
+`/mnt/tempdata/rota/rotax/blastdb/`. An unindexed FASTA alone is insufficient.
+The database must contain RotaTeq references for all 11 segments to report all
+11 vaccine identities, alongside the other references used for comparison.
 
 If `contigs500.fasta` already exists in each sample folder and you only want to rerun genotyping:
 
 ```bash
-python3 /path/to/rotax.py --skip-assembly --blast-db /path/to/241130_rotadb
+python3 /mnt/tempdata/rota/rotax/rotax.py --skip-assembly --overwrite-existing --blast-db /path/to/241130_rotadb
 ```
 
 Useful options:
 
 ```text
 --blast-db        Path/prefix of the rotavirus BLAST database.
---host-db         Optional path/prefix of a host BLAST database.
 --threads         Threads for SPAdes/rnaViralSPAdes. Default: 12.
 --min-cov         Minimum contig k-mer coverage parsed from the SPAdes header. Default: 3.
 --skip-assembly   Skip assembly and start from existing contigs500.fasta files.
 --no-cleanup      Keep intermediate FASTQ files and SPAdes work folders.
+--fasta-input     Genotype an existing FASTA without assembly.
+--no-mapping      Disable read-mapping consensus (e.g. FASTA-only typing).
+--overwrite-existing  Replace existing pipeline outputs and rerun; with --skip-assembly, preserve contigs500.fasta.
+--skip-existing   Skip samples that already have outputs.
 ```
 
 ## Output
@@ -86,16 +132,27 @@ The final report is written to the directory where the pipeline is run:
 rotax_all_samples_genotyping_report.csv
 ```
 
-This is the main all-samples report. It contains one row per sample and includes:
+This is the main all-samples report, with one row per sample. Its 19 columns,
+in order, are:
 
-- `Folder Name`: sample folder name
-- `Genotype`: full 11-segment genotype constellation
-- `Extra Information`: additional detected genotypes when more than one genotype was detected for a segment
-- `Rotarix VP7`: percent identity to the RIX4414 VP7 reference, if relevant
-- `Rotarix VP4`: percent identity to the RIX4414 VP4 reference, if relevant
-- `RotaTeq VP6`: percent identity to the RotaTeq VP6 reference, if relevant
-- `G_P_Genotype`: only the G/P part of the genotype constellation
-- `ResultCategory`: generic result category, currently `RVA` when both G and P are resolved, otherwise `UTILSTREKV`
+```text
+Folder Name,LabwareGenotype,Genotype,Extra Information,Rotarix VP7,Rotarix VP4,RotaTeq VP7,RotaTeq VP4,RotaTeq VP6,RotaTeq VP1,RotaTeq VP2,RotaTeq VP3,RotaTeq NSP1,RotaTeq NSP2,RotaTeq NSP3,RotaTeq NSP4,RotaTeq NSP5,Art,G3 equine-like
+```
+
+- `Folder Name`: sample folder name.
+- `LabwareGenotype`: full constellation for a single genotype per segment, or the `Koinfeksjon(...)` display described below.
+- `Genotype`: original 11-segment call, retained for downstream mapping and interpretation.
+- `Extra Information`: additional accepted genotype calls, including alternatives to tied `?` calls; `None` when absent.
+- `Rotarix VP7`, `Rotarix VP4`: mean percent identity of accepted G1/P8 hits containing `RIX4414`.
+- Eleven `RotaTeq` columns: highest qualifying percent identity for each segment; blank when no qualifying closest RotaTeq match exists. See the matching rules below.
+- `Art`: retains the previous rule based on the original primary constellation: `RVA` when both primary G and P are resolved numeric genotypes, otherwise `UTILSTREKV`. A mixture with tied primary calls can therefore remain `UTILSTREKV`.
+- `G3 equine-like`: `y` when the selected G3 hit is equine-like; otherwise blank.
+
+The per-sample report has the same first 17 columns. Empty samples use the same
+schema, with blank genotype/vaccine fields and `Extra Information=None`.
+When combining older sample reports, the script reconstructs the new display
+and recomputes RotaTeq identities from retained evaluated BLAST hits. If that
+evidence is missing, it logs a warning and leaves RotaTeq fields blank.
 
 The main log file is:
 
@@ -153,7 +210,7 @@ Counts of accepted full and partial contigs for each genotype, separated by high
 rotax_sample_genotyping_report.csv
 ```
 
-Final per-sample genotype report. These files are combined into `rotax_all_samples_genotyping_report.csv`.
+Final per-sample genotype report, including the coinfection display, preserved constellation, and all 11 RotaTeq fields. These files are combined into `rotax_all_samples_genotyping_report.csv`.
 
 ```text
 rotavirus_selected_contigs.fasta
@@ -167,11 +224,10 @@ rotavirus_selected_orfs.fasta
 
 The selected contig regions corresponding to the BLAST hit coordinates. Sequences are reverse-complemented when the BLAST hit is on the minus strand.
 
-```text
-host_blast_comparison.csv
-```
-
-Optional. Created only when `--host-db` is supplied. The selected ORF sequences are blasted against the host database, and the closest hits are written here.
+Read mapping is enabled by default when reads and a full-segment database are
+available. Its outputs are stored under each sample's `mapping/` folder,
+including consensus FASTA, GenBank FASTA/features, mapping summary, and the
+interactive validation HTML. Host-database searching is no longer supported.
 
 ## Genotype selection logic
 
@@ -190,23 +246,79 @@ If several genotypes tie for the best evidence, that segment is reported as `?`,
 
 Additional lower-priority genotypes detected in the same sample are also listed in `Extra Information`.
 
+## Coinfection display
+
+Two or more distinct numeric genotypes in **any** segment trigger the
+`Koinfeksjon(...)` display in `LabwareGenotype` in both sample and all-samples reports. Evidence comes
+from the original selected constellation plus accepted alternatives in
+`Extra Information`. `X` or `?` by itself does not establish a mixture. The
+existing acceptance thresholds and genotype selection priorities are unchanged.
+
+The primary selected call is listed first, followed by additional calls in
+numeric order; tied calls are listed in numeric order. P types always use
+brackets. Formatting consistently uses no space before `(` and a hyphen between
+G and P:
+
+| Detected calls | `LabwareGenotype` |
+|---|---|
+| Primary G2/P8, additional G4/P4 | `Koinfeksjon(G2G4-P[8]P[4])` |
+| Primary G1/P8, additional G3 | `Koinfeksjon(G1G3-P[8])` |
+| G3/P8, mixed I1/I2 and N1/N2 | `Koinfeksjon(G3-P[8])` |
+
+Internal-segment mixtures still trigger the coinfection label even if only one
+G type and one P type are detected. The original constellation remains in
+`Genotype`, and alternative calls remain in `Extra Information`. No undetected
+G/P calls are added to the display. There is no separate coinfection comment column.
+
 ## Vaccine-like reference matches
 
-Rotarix-like matches are identified using the marker `RIX4414` in the BLAST subject header.
+Rotarix matching is unchanged: `Rotarix VP7` is the mean percent identity among
+accepted G1 hits containing `RIX4414`, and `Rotarix VP4` uses accepted P8 hits
+with that marker. Marker matching is case-insensitive.
 
-RotaTeq-like VP6 matches are identified using the marker `RotaTeq` in the BLAST subject header.
+RotaTeq now covers all 11 segments, in constellation order:
 
-The final reports can include percent identity values for:
+| Genotype prefix | Output column |
+|---|---|
+| G | `RotaTeq VP7` |
+| P | `RotaTeq VP4` |
+| I | `RotaTeq VP6` |
+| R | `RotaTeq VP1` |
+| C | `RotaTeq VP2` |
+| M | `RotaTeq VP3` |
+| A | `RotaTeq NSP1` |
+| N | `RotaTeq NSP2` |
+| T | `RotaTeq NSP3` |
+| E | `RotaTeq NSP4` |
+| H | `RotaTeq NSP5` |
 
-- `Rotarix VP7`
-- `Rotarix VP4`
-- `RotaTeq VP6`
+For each selected contig/segment, retained same-segment BLAST hits are ranked by
+**bitscore first, percent identity second**. A value is eligible only when the
+closest reported reference contains `RotaTeq` (case-insensitive) and its hit
+passes the existing acceptance criteria. Any reported exact top-score tie with
+a non-RotaTeq reference is excluded for that contig. A lower-ranked vaccine hit
+does not qualify. If multiple selected contigs qualify for a segment, the cell
+contains **only the highest percent identity**, without averaging. Missing or
+nonqualifying matches are blank, not zero.
 
-These values are reported only when the expected genotype/segment and reference-marker combination is found among accepted BLAST hits.
+Values are BLAST nucleotide `pident` percentages over the aligned region;
+they are not whole-segment coverage percentages. The genotyping BLAST retains
+one target per contig (`-max_target_seqs 1`), so "closest" refers to the top
+reported reference in the database used. Unreported ties cannot be assessed.
+The evaluated BLAST CSV retains the contig/reference evidence. The new rule
+also replaces the old average used for `RotaTeq VP6`.
+
+Headers with a segment-only prefix, such as `G|RotaTeq-...` or
+`R|RotaTeq-...`, can supply vaccine identity evidence without inventing numeric
+genotypes. Numeric genotype reporting still requires correctly typed reference
+headers. Adding a FASTA file to the database directory does not add it to an
+existing BLAST index: the references must be included when building that index.
 
 ## Important notes
 
 `not accepted` means that the BLAST hit did not pass the current criteria for being carried forward as a genotype call. The details are written to `not_accepted_typing_report.csv`.
+
+
 
 
 ## NGS bioinformatics pipeline
@@ -227,7 +339,6 @@ graph TD;
     Evaluate["Apply segment-specific length and identity cutoffs"];
     Select["Select genotype calls and representative contigs/ORFs"];
     Report["rotax_all_samples_genotyping_report.csv"];
-    Host["Optional host BLAST"];
 
     Trimmomatic --> Clumpify_Spades;
     Trimmomatic --> BBNorm_Spades1;
@@ -246,5 +357,4 @@ graph TD;
     BLAST --> Evaluate;
     Evaluate --> Select;
     Select --> Report;
-    Select --> Host;
 ```
