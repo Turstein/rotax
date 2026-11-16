@@ -2,7 +2,6 @@
 
 ## Latest version
 
-- **Executable:** `/mnt/tempdata/rota/rotax/rotax.py`
 - **Version:** `2026-11-11-v34-report-columns` 
 - **Updated:** 2026-11-11
 
@@ -13,19 +12,14 @@ Verify the installed version:
 python3 /mnt/tempdata/rota/rotax/rotax.py --version
 ```
 
-For every future release, update this version, update date, and executable path together.
+
 
 ## About
 
-**Warning:** `rotax` is a command-line pipeline for genotyping Rotavirus A and is still under validation. The most validated use is currently G- and P-typing. Results for the remaining genome segments should be interpreted with extra care and checked manually when important.
+`rotax` is a command-line pipeline for genotyping Rotavirus A. The most validated use is currently G- and P-typing. Results should be interpreted with care and checked manually when important.
 
 `rotax` genotypes Rotavirus A from Illumina paired-end data or from already assembled contigs. It performs de novo assembly with several SPAdes/rnaViralSPAdes strategies, collects contigs, filters them by length and coverage, and then performs genotyping with BLAST against a local rotavirus database.
 
-The pipeline preserves the full 11-segment Rotavirus A genotype constellation in `Genotype`:
-
-```text
-G-P-I-R-C-M-A-N-T-E-H
-```
 
 If a segment is not detected, the genotype is reported as `X`, for example `GX` or `PX`. If several possible genotypes are detected for the same segment and the pipeline cannot select one clear result, the segment is reported as `?`, for example `G?`, and the alternatives are listed in `Extra Information`.
 
@@ -33,7 +27,6 @@ Cutoffs are based on the genotype-assignment principles described by Matthijnsse
 
 https://pubmed.ncbi.nlm.nih.gov/18604469/
 
-The BLAST database is not embedded in the script and must be provided separately.
 
 ## Install
 
@@ -49,22 +42,19 @@ Activate the environment before running the pipeline:
 conda activate rotax
 ```
 
-## Create the BLAST databases
+## Create the BLAST databases (If updating the database)
 
-Run these commands in the `rotax` conda environment, which must provide
-`makeblastdb` and `blastdbcmd` from NCBI BLAST+. They build or rebuild the indexes
-from the existing reference FASTA files.
-
-mamba activate rotax
-makeblastdb -in /mnt/tempdata/rota/rotax/blastdb/References_all_segments_plus_vaccine.fasta -dbtype nucl -out /mnt/tempdata/rota/rotax/blastdb/References_all_segments_plus_vaccine
-
-```
-
-These commands omit `-parse_seqids` to accommodate the existing custom reference
-headers. Keep each source FASTA beside its database with the same prefix and
+Keep each source FASTA beside its database with the same prefix and
 the `.fasta` extension: RotaX uses it to retrieve reference sequences for mapping
 and alignment. Preserve the genotype prefixes and vaccine markers in headers.
 Rebuild the corresponding database whenever its source FASTA changes.
+
+Run these commands in the `rotax` conda environment, which must provide
+`makeblastdb` and `blastdbcmd` from NCBI BLAST+. They build or rebuild the indexes
+from the existing reference FASTA files. Make sure the fasta headers are formatted as shown in this repository.
+
+mamba activate rotax
+makeblastdb -in blastdb/References_all_segments_plus_vaccine.fasta -dbtype nucl -out blastdb/References_all_segments_plus_vaccine
 
 The script can auto-detect these databases when each directory contains only
 one indexed database prefix. To select them explicitly, run the following from
@@ -72,8 +62,8 @@ the parent directory containing the sample folders:
 
 ```bash
 python3 /mnt/tempdata/rota/rotax/rotax.py \
-    --blast-db /mnt/tempdata/rota/rotax/blastdb/References_all_segments_plus_vaccine \
-    --full-segment-db /mnt/tempdata/rota/rotax/fulldb/rotavirus_full_segments
+    --blast-db /path/to/rotax/blastdb/References_all_segments_plus_vaccine \
+    --full-segment-db /path/to/rotax/fulldb/rotavirus_full_segments
 ```
 
 Pass the database **prefix**, without `.fasta`, `.nin`, or `.nsq`, to these
@@ -94,7 +84,7 @@ Each sample folder should contain paired-end FASTQ files matching:
 Typical use:
 
 ```bash
-python3 /mnt/tempdata/rota/rotax/rotax.py --blast-db /path/to/241130_rotadb
+python3 /path/to/rotax/rotax.py
 ```
 
 Without `--blast-db`, the script looks for a unique indexed database prefix in
@@ -105,7 +95,7 @@ The database must contain RotaTeq references for all 11 segments to report all
 If `contigs500.fasta` already exists in each sample folder and you only want to rerun genotyping:
 
 ```bash
-python3 /mnt/tempdata/rota/rotax/rotax.py --skip-assembly --overwrite-existing --blast-db /path/to/241130_rotadb
+python3 /path/to/rotax/rotax.py --skip-assembly --overwrite-existing --blast-db /path/to/db
 ```
 
 Useful options:
@@ -227,7 +217,7 @@ The selected contig regions corresponding to the BLAST hit coordinates. Sequence
 Read mapping is enabled by default when reads and a full-segment database are
 available. Its outputs are stored under each sample's `mapping/` folder,
 including consensus FASTA, GenBank FASTA/features, mapping summary, and the
-interactive validation HTML. Host-database searching is no longer supported.
+interactive validation HTML. 
 
 ## Genotype selection logic
 
@@ -276,7 +266,7 @@ Rotarix matching is unchanged: `Rotarix VP7` is the mean percent identity among
 accepted G1 hits containing `RIX4414`, and `Rotarix VP4` uses accepted P8 hits
 with that marker. Marker matching is case-insensitive.
 
-RotaTeq now covers all 11 segments, in constellation order:
+RotaTeq covers all 11 segments, in constellation order:
 
 | Genotype prefix | Output column |
 |---|---|
@@ -321,7 +311,7 @@ existing BLAST index: the references must be included when building that index.
 
 
 
-## NGS bioinformatics pipeline
+## NGS bioinformatics pipeline for genotyping Rotavirus A
 
 ```mermaid
 graph TD;
@@ -358,3 +348,93 @@ graph TD;
     Evaluate --> Select;
     Select --> Report;
 ```
+
+## NGS read mapping and consensus generation for Rotavirus A
+
+After genotyping, `rotax` uses the selected assembly-derived ORFs to choose
+full-segment references, then maps paired-end reads to those references to
+produce consensus sequences. Mapping is enabled by default and
+requires a full-segment BLAST database, paired reads, BWA, samtools, and bcftools.
+MAFFT is used for CDS annotation and alignment-based validation.
+
+1. **Choose mapping references.** Each selected ORF is BLASTed against the
+   full-segment database. The closest same-segment reference is selected by
+   bitscore, then percent identity, and oriented to positive sense. Identical
+   reference sequences selected for the same segment are merged. All selected
+   references are included in a shared mapping index for the sample.
+2. **Map paired reads.** The pipeline prefers Trimmomatic paired reads, then
+   repaired trimmed reads, then Clumpify-deduplicated reads. BWA MEM maps the
+   reads, and samtools sorts and indexes the BAM. Explicit `--mapping-r1` and
+   `--mapping-r2` inputs override this selection. Raw FASTQ fallback requires
+   `--allow-raw-fastq-mapping`.
+3. **Polish and remap.** By default, one polishing round applies called SNPs to
+   the mapping target and remaps the reads. This can recover read ends that
+   aligned poorly to the original reference. Indels are excluded from this
+   intermediate target to preserve reference coordinates. Set
+   `--mapping-polish-rounds 0` to disable polishing.
+4. **Call the consensus.** bcftools calls variants and applies them to the
+   mapping target. Positions below `--mapping-min-depth` (default: 5 reads)
+   are masked with `N`. For a called two-allele genotype, an IUPAC ambiguity is
+   retained only when the less-supported allele has at least 5 high-quality
+   allele-depth reads and at least 20% of the combined called-allele depth;
+   otherwise, the allele with greater read support is used.
+5. **Assess completeness and annotate.** A consensus is classified as full
+   when at least 99% of the selected reference is covered at the minimum depth
+   and no more than 5 bases are missing at either end. These thresholds are
+   controlled by `--mapping-ref-cov-full` and
+   `--mapping-max-missing-end-bases`. Protein alignments to the best
+   same-segment genotyping-database ORF guide CDS annotation. The pipeline also
+   compares the mapping-derived ORF with the selected assembly-derived ORF.
+6. **Export and review.** Consensus FASTA files, coverage and annotation tables,
+   and an interactive validation HTML are written to the sample's `mapping/`
+   folder. Possible mixed infections are mapped but remain review-only for
+   GenBank by default. The GenBank FASTA export trims terminal Ns and has a
+   companion feature table with adjusted coordinates; its completeness labels
+   are distinct from the mapping coverage classification.
+
+```mermaid
+graph TD;
+    ORFs["Selected assembly-derived ORFs"];
+    FullDB["Full-segment BLAST database"];
+    References["Select closest same-segment references and orient to positive sense"];
+    Reads["Paired trimmed reads or explicitly supplied reads"];
+    Mapping["BWA MEM mapping + samtools sort and index"];
+    Polish["SNP-correct mapping target and remap: default 1 round"];
+    Calls["bcftools variant calling and allele-support filtering"];
+    Depth["samtools depth: mask positions below minimum depth"];
+    Consensus["Consensus sequences with N masks and supported IUPAC calls"];
+    QC["Assess completeness, annotate CDS, and compare assembly-derived ORFs"];
+    Export["Consensus FASTA, summary, GenBank export, and validation HTML"];
+
+    ORFs --> References;
+    FullDB --> References;
+    References --> Mapping;
+    Reads --> Mapping;
+    Mapping --> Polish;
+    Polish --> Calls;
+    Polish --> Depth;
+    Calls --> Consensus;
+    Depth --> Consensus;
+    Consensus --> QC;
+    QC --> Export;
+```
+
+The main per-sample outputs are:
+
+| File in `mapping/` | Contents |
+|---|---|
+| `rotavirus_mapping_consensus.fasta` | All mapping consensus sequences, including partial sequences. |
+| `rotavirus_mapping_consensus_full.fasta` | Sequences meeting the mapping completeness thresholds. |
+| `rotavirus_mapping_consensus_partial_or_review.fasta` | Partial sequences and sequences requiring review. |
+| `rotavirus_mapping_summary.csv` | Reference selection, coverage, completeness, and GenBank readiness information. |
+| `rotavirus_mapping_depth.tsv` | Per-position depth information. |
+| `rotavirus_mapping_consensus_features.csv` | Source and CDS feature coordinates. |
+| `rotavirus_mapping_consensus_genbank.fasta` | Terminal-N-trimmed sequences with complete/partial labels for GenBank preparation. |
+| `rotavirus_mapping_consensus_genbank_features.csv` | Feature coordinates adjusted for terminal trimming. |
+| `rotavirus_mapping_validation.html` | Interactive reference/consensus alignment, ORF comparison, and depth views. |
+
+Combined outputs in the main run directory are
+`rotax_mapping_consensus_all.fasta`, `rotax_mapping_consensus_full.fasta`,
+`rotax_mapping_summary.csv`, and `rotax_mapping_consensus_features.csv`.
+Use `--no-mapping` to disable consensus generation or `--no-mapping-validation`
+to omit the validation HTML.
